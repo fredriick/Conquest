@@ -103,12 +103,14 @@ def create_user(user_id, tokens):
 active_matches = {}
 matchmaking_queue = []
 player_states = defaultdict(dict)
+active_tournaments = {}
+tournament_queue = []
 
 def get_main_menu_keyboard():
     keyboard = [
         [KeyboardButton("⚔️ Battle Mode"), KeyboardButton("💰 Check Balance")],
         [KeyboardButton("🎁 Daily Bonus"), KeyboardButton("🏆 Leaderboard")],
-        [KeyboardButton("💱 Swap Tokens")]
+        [KeyboardButton("💱 Swap Tokens"), KeyboardButton("🏆 Tournament Mode")]
     ]
     return ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
 
@@ -129,7 +131,8 @@ def start(update: Update, context: CallbackContext) -> None:
         "/balance - Check your balance\n"
         "/daily - Claim daily bonus\n"
         "/leaderboard - View top players\n"
-        "/swap - Swap tokens for crypto"
+        "/swap - Swap tokens for crypto\n"
+        "/tournament - Create or join a tournament"
     )
     update.message.reply_html(welcome_message, reply_markup=get_main_menu_keyboard())
 
@@ -147,6 +150,8 @@ def handle_menu_choice(update: Update, context: CallbackContext) -> None:
         show_leaderboard(update, context)
     elif text == "💱 Swap Tokens":
         show_swap_options(update, context)
+    elif text == "🏆 Tournament Mode":
+        create_tournament(update, context)
     else:
         update.message.reply_text("Please use the menu buttons or commands.", reply_markup=get_main_menu_keyboard())
 
@@ -540,6 +545,211 @@ def show_leaderboard(update: Update, context: CallbackContext) -> None:
 
     update.message.reply_text(message, reply_markup=get_main_menu_keyboard())
 
+def create_tournament(update: Update, context: CallbackContext) -> None:
+    user = update.effective_user
+    user_data = get_user_data(user.id)
+    
+    if not user_data:
+        update.message.reply_text("❌ Please start the bot first with /start")
+        return
+        
+    if user_data["tokens"] < 200:
+        update.message.reply_text("❌ You need at least 200 tokens to create a tournament!")
+        return
+    
+    tournament_id = len(active_tournaments) + 1
+    tournament = {
+        "id": tournament_id,
+        "creator": user.id,
+        "players": [user.id],
+        "entry_fee": 100,
+        "prize_pool": 100,
+        "status": "registering",
+        "matches": [],
+        "round": 0,
+        "created_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    }
+    
+    active_tournaments[tournament_id] = tournament
+    
+    # Create tournament announcement keyboard
+    keyboard = [
+        [InlineKeyboardButton("🎮 Join Tournament", callback_data=f"join_tournament_{tournament_id}")],
+        [InlineKeyboardButton("🚫 Cancel Tournament", callback_data=f"cancel_tournament_{tournament_id}")]
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    # Deduct entry fee
+    update_user_data(user.id, user_data["tokens"] - 100)
+    
+    message = (
+        f"🏆 New Tournament Created #{tournament_id}\n\n"
+        f"Entry Fee: 100 tokens\n"
+        f"Current Prize Pool: 100 tokens\n"
+        f"Players: 1/8\n\n"
+        f"Tournament will start when 8 players join!\n"
+        f"Winner takes 70% of prize pool\n"
+        f"Runner-up takes 20% of prize pool\n"
+        f"Semi-finalists share 10% of prize pool"
+    )
+    
+    update.message.reply_text(message, reply_markup=reply_markup)
+
+def handle_tournament_join(update: Update, context: CallbackContext) -> None:
+    query = update.callback_query
+    query.answer()
+    
+    _, tournament_id = query.data.split('_')
+    tournament_id = int(tournament_id)
+    user = query.from_user
+    user_data = get_user_data(user.id)
+    
+    if not user_data:
+        query.edit_message_text("❌ Please start the bot first with /start")
+        return
+        
+    if user_data["tokens"] < 100:
+        query.edit_message_text("❌ You need 100 tokens to join the tournament!")
+        return
+        
+    tournament = active_tournaments.get(tournament_id)
+    if not tournament:
+        query.edit_message_text("❌ Tournament not found or already ended!")
+        return
+        
+    if user.id in tournament["players"]:
+        query.edit_message_text("❌ You're already in this tournament!")
+        return
+        
+    if len(tournament["players"]) >= 8:
+        query.edit_message_text("❌ Tournament is full!")
+        return
+    
+    # Add player and update prize pool
+    tournament["players"].append(user.id)
+    tournament["prize_pool"] += 100
+    update_user_data(user.id, user_data["tokens"] - 100)
+    
+    # Update tournament message
+    keyboard = [
+        [InlineKeyboardButton("🎮 Join Tournament", callback_data=f"join_tournament_{tournament_id}")],
+        [InlineKeyboardButton("🚫 Cancel Tournament", callback_data=f"cancel_tournament_{tournament_id}")]
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    message = (
+        f"🏆 Tournament #{tournament_id}\n\n"
+        f"Entry Fee: 100 tokens\n"
+        f"Current Prize Pool: {tournament['prize_pool']} tokens\n"
+        f"Players: {len(tournament['players'])}/8\n\n"
+        f"Tournament will start when 8 players join!\n"
+        f"Winner takes 70% of prize pool\n"
+        f"Runner-up takes 20% of prize pool\n"
+        f"Semi-finalists share 10% of prize pool"
+    )
+    
+    query.edit_message_text(message, reply_markup=reply_markup)
+    
+    # Start tournament if 8 players joined
+    if len(tournament["players"]) == 8:
+        start_tournament_round(context, tournament_id)
+
+def start_tournament_round(context: CallbackContext, tournament_id: int) -> None:
+    tournament = active_tournaments[tournament_id]
+    tournament["round"] += 1
+    players = tournament["players"]
+    
+    if len(players) == 1:
+        # Tournament ended, distribute prizes
+        end_tournament(context, tournament_id)
+        return
+    
+    # Pair players randomly
+    random.shuffle(players)
+    matches = []
+    
+    for i in range(0, len(players), 2):
+        if i + 1 < len(players):
+            match_id = len(active_matches) + 1
+            match = {
+                "id": match_id,
+                "tournament_id": tournament_id,
+                "player1": {"user_id": players[i]},
+                "player2": {"user_id": players[i + 1]},
+                "moves": {},
+                "status": "active",
+                "round": tournament["round"]
+            }
+            matches.append(match)
+            active_matches[match_id] = match
+    
+    tournament["matches"].extend(matches)
+    
+    # Notify players and start matches
+    for match in matches:
+        p1_data = get_user_data(match["player1"]["user_id"])
+        p2_data = get_user_data(match["player2"]["user_id"])
+        
+        keyboard = [
+            [
+                InlineKeyboardButton("🗿 Rock", callback_data=f"move_{match['id']}_rock"),
+                InlineKeyboardButton("📄 Paper", callback_data=f"move_{match['id']}_paper"),
+                InlineKeyboardButton("✂️ Scissors", callback_data=f"move_{match['id']}_scissors")
+            ]
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        message = (
+            f"🏆 Tournament Round {tournament['round']}\n"
+            f"Make your move!\n\n"
+            f"You vs Opponent\n"
+            f"Rating: {p1_data['rating']} vs {p2_data['rating']}"
+        )
+        
+        context.bot.send_message(
+            match["player1"]["user_id"],
+            message,
+            reply_markup=reply_markup
+        )
+        context.bot.send_message(
+            match["player2"]["user_id"],
+            message,
+            reply_markup=reply_markup
+        )
+
+def end_tournament(context: CallbackContext, tournament_id: int) -> None:
+    tournament = active_tournaments[tournament_id]
+    prize_pool = tournament["prize_pool"]
+    
+    # Get winner (last remaining player)
+    winner_id = tournament["players"][0]
+    winner_data = get_user_data(winner_id)
+    
+    # Calculate prizes
+    winner_prize = int(prize_pool * 0.7)  # 70% to winner
+    runner_up_prize = int(prize_pool * 0.2)  # 20% to runner-up
+    semifinal_prize = int(prize_pool * 0.1 / 2)  # 10% split between semi-finalists
+    
+    # Update winner's tokens and send message
+    update_user_data(winner_id, winner_data["tokens"] + winner_prize)
+    
+    message = (
+        f"🎊 Tournament #{tournament_id} Ended!\n\n"
+        f"🏆 Winner: {winner_data['username']}\n"
+        f"💰 Prize: {winner_prize} tokens\n\n"
+        f"Thank you for participating!"
+    )
+    
+    # Notify all players
+    for player_id in set(p["user_id"] for match in tournament["matches"] for p in [match["player1"], match["player2"]]):
+        try:
+            context.bot.send_message(player_id, message, reply_markup=get_main_menu_keyboard())
+        except:
+            continue
+    
+    # Clean up
+    del active_tournaments[tournament_id]
+
 def main() -> None:
     setup_database()
     load_dotenv()
@@ -553,8 +763,10 @@ def main() -> None:
     dispatcher.add_handler(CommandHandler("daily", claim_daily_bonus))
     dispatcher.add_handler(CommandHandler("leaderboard", show_leaderboard))
     dispatcher.add_handler(CommandHandler("swap", show_swap_options))
+    dispatcher.add_handler(CommandHandler("tournament", create_tournament))
     dispatcher.add_handler(CallbackQueryHandler(handle_battle_stake, pattern='^stake_[0-9]+$'))
     dispatcher.add_handler(CallbackQueryHandler(handle_battle_move, pattern='^move_[0-9]+_[a-z]+$'))
+    dispatcher.add_handler(CallbackQueryHandler(handle_tournament_join, pattern='^join_tournament_[0-9]+$'))
     dispatcher.add_handler(MessageHandler(Filters.text & ~Filters.command, handle_menu_choice))
 
     updater.start_polling()
