@@ -10,6 +10,15 @@ A multiplayer token-based battle game for Telegram with competitive mechanics an
 - **Daily Bonuses**: Regular token rewards for active players
 - **Token Swaps**: Convert game tokens to crypto (coming soon)
 - **Leaderboard**: Track top players and rankings
+- 🏆 Tournament Mode (NEW!)
+  - 8-player tournaments
+  - Entry fee: 100 tokens
+  - Progressive prize pool
+  - Multi-round elimination
+  - Prize distribution:
+    - Winner: 70% of pool
+    - Runner-up: 20% of pool
+    - Semi-finalists: 10% of pool (split)
 
 ## 🎯 Game Mechanics
 
@@ -160,7 +169,6 @@ python run.py
 
 1. Advanced Features
    - Automated matchmaking
-   - Tournament mode
    - Achievement system
    - More game modes
 
