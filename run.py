@@ -31,7 +31,11 @@ def setup_database():
                   last_daily TEXT DEFAULT '',
                   wins INTEGER DEFAULT 0,
                   losses INTEGER DEFAULT 0,
-                  rating INTEGER DEFAULT 1000)''')
+                  rating INTEGER DEFAULT 1000,
+                  character_class TEXT,
+                  referral_code TEXT,
+                  referrals INTEGER DEFAULT 0,
+                  used_referral INTEGER DEFAULT 0)''')
     
     # Game sessions table
     c.execute('''CREATE TABLE IF NOT EXISTS game_sessions
@@ -60,7 +64,7 @@ def setup_database():
 def get_user_data(user_id):
     conn = sqlite3.connect('game.db')
     c = conn.cursor()
-    c.execute("SELECT id, tokens, last_daily, wins, losses, rating FROM users WHERE id=?", (user_id,))
+    c.execute("SELECT id, tokens, last_daily, wins, losses, rating, character_class, referral_code, referrals, used_referral FROM users WHERE id=?", (user_id,))
     user = c.fetchone()
     conn.close()
     if user is None:
@@ -71,16 +75,26 @@ def get_user_data(user_id):
         "last_daily": user[2],
         "wins": user[3],
         "losses": user[4],
-        "rating": user[5]
+        "rating": user[5],
+        "character_class": user[6],
+        "referral_code": user[7],
+        "referrals": user[8],
+        "used_referral": user[9]
     }
 
-def update_user_data(user_id, tokens, last_daily=None, wins=None, losses=None, rating=None):
+def update_user_data(user_id, tokens, last_daily=None, wins=None, losses=None, rating=None, character_class=None, referrals=None, used_referral=None):
     conn = sqlite3.connect('game.db')
     c = conn.cursor()
     if last_daily and wins and losses and rating:
         c.execute("UPDATE users SET tokens=?, last_daily=?, wins=?, losses=?, rating=? WHERE id=?", (tokens, last_daily, wins, losses, rating, user_id))
     elif last_daily:
         c.execute("UPDATE users SET tokens=?, last_daily=? WHERE id=?", (tokens, last_daily, user_id))
+    elif character_class:
+        c.execute("UPDATE users SET tokens=?, character_class=? WHERE id=?", (tokens, character_class, user_id))
+    elif referrals is not None:
+        c.execute("UPDATE users SET tokens=?, referrals=? WHERE id=?", (tokens, referrals, user_id))
+    elif used_referral is not None:
+        c.execute("UPDATE users SET tokens=?, used_referral=? WHERE id=?", (tokens, used_referral, user_id))
     else:
         c.execute("UPDATE users SET tokens=? WHERE id=?", (tokens, user_id))
     conn.commit()
@@ -99,18 +113,288 @@ def create_user(user_id, tokens):
         print(f"Database error: {e}")
         return False
 
+# Character Classes and Special Events System
+CHARACTER_CLASSES = {
+    'warrior': {
+        'name': '⚔️ Warrior',
+        'description': 'Bonus token rewards from battles',
+        'perk': lambda reward: int(reward * 1.2),  # 20% more tokens
+        'cost': 1000
+    },
+    'mage': {
+        'name': '🔮 Mage',
+        'description': 'Reduced power-up costs',
+        'perk': lambda cost: int(cost * 0.8),  # 20% cheaper power-ups
+        'cost': 1000
+    },
+    'rogue': {
+        'name': '🗡️ Rogue',
+        'description': 'Chance to steal extra tokens',
+        'perk': lambda stake: random.randint(0, int(stake * 0.1)),  # Up to 10% extra tokens
+        'cost': 1000
+    }
+}
+
+SPECIAL_EVENTS = {
+    'double_rewards': {
+        'name': '💰 Double Rewards Weekend',
+        'description': 'All battle rewards are doubled',
+        'modifier': lambda reward: reward * 2,
+        'duration': timedelta(days=2)
+    },
+    'power_hour': {
+        'name': '⚡ Power Hour',
+        'description': 'Power-ups are 50% off',
+        'modifier': lambda cost: cost // 2,
+        'duration': timedelta(hours=1)
+    },
+    'tournament_frenzy': {
+        'name': '🏆 Tournament Frenzy',
+        'description': 'Tournament entry fees reduced by 50%',
+        'modifier': lambda fee: fee // 2,
+        'duration': timedelta(hours=3)
+    }
+}
+
+# Referral System
+REFERRAL_REWARDS = {
+    'referrer': 200,  # Tokens for referring
+    'referee': 100    # Tokens for being referred
+}
+
+def show_character_classes(update: Update, context: CallbackContext) -> None:
+    """Show available character classes and allow purchase."""
+    user_id = update.effective_user.id
+    user_data = get_user_data(user_id)
+    
+    if not user_data:
+        update.message.reply_text("❌ Please start the bot first with /start")
+        return
+    
+    message = "🎭 Character Classes:\n\n"
+    keyboard = []
+    
+    current_class = user_data.get('character_class', None)
+    
+    for class_id, char_class in CHARACTER_CLASSES.items():
+        status = "✅ Selected" if class_id == current_class else f"💰 Cost: {char_class['cost']} tokens"
+        message += f"{char_class['name']}\n"
+        message += f"   {char_class['description']}\n"
+        message += f"   {status}\n\n"
+        
+        if class_id != current_class:
+            keyboard.append([InlineKeyboardButton(
+                f"Select {char_class['name']} ({char_class['cost']} tokens)",
+                callback_data=f"select_class_{class_id}"
+            )])
+    
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    update.message.reply_text(message, reply_markup=reply_markup)
+
+def handle_class_selection(update: Update, context: CallbackContext) -> None:
+    """Handle character class selection."""
+    query = update.callback_query
+    query.answer()
+    
+    user_id = query.from_user.id
+    user_data = get_user_data(user_id)
+    
+    if not user_data:
+        query.edit_message_text("❌ Please start the bot first with /start")
+        return
+    
+    class_id = query.data.split('_')[-1]  # Get the last part after splitting
+    char_class = CHARACTER_CLASSES.get(class_id)
+    
+    if not char_class:
+        query.edit_message_text("❌ Invalid character class!")
+        return
+    
+    if user_data['tokens'] < char_class['cost']:
+        query.edit_message_text(f"❌ Not enough tokens! You need {char_class['cost']} tokens.")
+        return
+    
+    # Update user's tokens and character class
+    cursor = get_db().cursor()
+    cursor.execute(
+        "UPDATE users SET tokens = ?, character_class = ? WHERE id = ?",
+        (user_data['tokens'] - char_class['cost'], class_id, user_id)
+    )
+    get_db().commit()
+    
+    message = (
+        f"✨ Character class selected!\n\n"
+        f"{char_class['name']}\n"
+        f"{char_class['description']}\n"
+        f"Use your new powers wisely!"
+    )
+    query.edit_message_text(message, reply_markup=get_main_menu_keyboard())
+
+def start_special_event() -> None:
+    """Start a random special event."""
+    event_id = random.choice(list(SPECIAL_EVENTS.keys()))
+    event = SPECIAL_EVENTS[event_id]
+    
+    active_events[event_id] = {
+        'name': event['name'],
+        'description': event['description'],
+        'end_time': datetime.now() + event['duration'],
+        'modifier': event['modifier']
+    }
+    
+    # Notify all users about the event
+    conn = sqlite3.connect('game.db')
+    c = conn.cursor()
+    c.execute("SELECT id FROM users")
+    users = c.fetchall()
+    conn.close()
+    
+    message = (
+        f"🎉 Special Event Started!\n\n"
+        f"{event['name']}\n"
+        f"{event['description']}\n"
+        f"Duration: {event['duration']}"
+    )
+    
+    for user_id in users:
+        try:
+            context.bot.send_message(user_id[0], message)
+        except:
+            continue
+
+def check_active_events() -> dict:
+    """Check and clean up expired events."""
+    current_time = datetime.now()
+    expired = []
+    
+    for event_id, event in active_events.items():
+        if current_time > event['end_time']:
+            expired.append(event_id)
+    
+    for event_id in expired:
+        del active_events[event_id]
+    
+    return active_events
+
+def apply_event_modifiers(value: int, event_type: str) -> int:
+    """Apply active event modifiers to a value."""
+    events = check_active_events()
+    modified_value = value
+    
+    for event in events.values():
+        if event_type in event['name'].lower():
+            modified_value = event['modifier'](modified_value)
+    
+    return modified_value
+
+def generate_referral_code(user_id: int) -> str:
+    """Generate a unique referral code for a user."""
+    return f"REF{user_id}{random.randint(1000, 9999)}"
+
+def show_referral_info(update: Update, context: CallbackContext) -> None:
+    """Show user's referral code and statistics."""
+    user_id = update.effective_user.id
+    user_data = get_user_data(user_id)
+    
+    if not user_data:
+        update.message.reply_text("❌ Please start the bot first with /start")
+        return
+    
+    referral_code = user_data.get('referral_code')
+    if not referral_code:
+        referral_code = generate_referral_code(user_id)
+        conn = sqlite3.connect('game.db')
+        c = conn.cursor()
+        c.execute(
+            "UPDATE users SET referral_code = ? WHERE id = ?",
+            (referral_code, user_id)
+        )
+        conn.commit()
+        conn.close()
+        
+        # Update user_data with new referral code
+        user_data['referral_code'] = referral_code
+    
+    referrals = user_data.get('referrals', 0)
+    total_rewards = referrals * REFERRAL_REWARDS['referrer']
+    
+    message = (
+        f"👥 Your Referral Information\n\n"
+        f"Referral Code: {referral_code}\n"
+        f"Total Referrals: {referrals}\n"
+        f"Total Rewards Earned: {total_rewards} tokens\n\n"
+        f"Share your referral code with friends!\n"
+        f"They'll receive {REFERRAL_REWARDS['referee']} tokens\n"
+        f"You'll receive {REFERRAL_REWARDS['referrer']} tokens"
+    )
+    
+    update.message.reply_text(message, reply_markup=get_main_menu_keyboard())
+
+def handle_referral_code(update: Update, context: CallbackContext) -> None:
+    """Handle referral code redemption."""
+    if len(context.args) != 1:
+        update.message.reply_text(
+            "❌ Please provide a referral code.\n"
+            "Usage: /referral REF12345"
+        )
+        return
+    
+    referral_code = context.args[0]
+    user_id = update.effective_user.id
+    user_data = get_user_data(user_id)
+    
+    if not user_data:
+        update.message.reply_text("❌ Please start the bot first with /start")
+        return
+    
+    if user_data.get('used_referral'):
+        update.message.reply_text("❌ You have already used a referral code!")
+        return
+    
+    # Find referrer
+    conn = sqlite3.connect('game.db')
+    c = conn.cursor()
+    c.execute("SELECT id FROM users WHERE referral_code = ?", (referral_code,))
+    referrer = c.fetchone()
+    
+    if not referrer or referrer[0] == user_id:
+        update.message.reply_text("❌ Invalid referral code!")
+        return
+    
+    # Update referrer
+    referrer_data = get_user_data(referrer[0])
+    update_user_data(
+        referrer[0],
+        referrer_data['tokens'] + REFERRAL_REWARDS['referrer'],
+        referrals=referrer_data.get('referrals', 0) + 1
+    )
+    
+    # Update referee
+    update_user_data(
+        user_id,
+        user_data['tokens'] + REFERRAL_REWARDS['referee'],
+        used_referral=True
+    )
+    
+    update.message.reply_text(
+        f"✨ Referral code redeemed!\n"
+        f"You received {REFERRAL_REWARDS['referee']} tokens!"
+    )
+
 # Game state management
 active_matches = {}
 matchmaking_queue = []
 player_states = defaultdict(dict)
 active_tournaments = {}
 tournament_queue = []
+active_events = {}
 
 def get_main_menu_keyboard():
     keyboard = [
         [KeyboardButton("⚔️ Battle Mode"), KeyboardButton("💰 Check Balance")],
         [KeyboardButton("🎁 Daily Bonus"), KeyboardButton("🏆 Leaderboard")],
-        [KeyboardButton("💱 Swap Tokens"), KeyboardButton("🏆 Tournament Mode")]
+        [KeyboardButton("💱 Swap Tokens"), KeyboardButton("🏆 Tournament Mode")],
+        [KeyboardButton("🎭 Character Classes"), KeyboardButton("👥 Referral Info")]
     ]
     return ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
 
@@ -132,7 +416,10 @@ def start(update: Update, context: CallbackContext) -> None:
         "/daily - Claim daily bonus\n"
         "/leaderboard - View top players\n"
         "/swap - Swap tokens for crypto\n"
-        "/tournament - Create or join a tournament"
+        "/tournament - Create or join a tournament\n"
+        "/referral - Redeem a referral code\n"
+        "/classes - View character classes\n"
+        "/referralinfo - View your referral information"
     )
     update.message.reply_html(welcome_message, reply_markup=get_main_menu_keyboard())
 
@@ -152,6 +439,10 @@ def handle_menu_choice(update: Update, context: CallbackContext) -> None:
         show_swap_options(update, context)
     elif text == "🏆 Tournament Mode":
         create_tournament(update, context)
+    elif text == "🎭 Character Classes":
+        show_character_classes(update, context)
+    elif text == "👥 Referral Info":
+        show_referral_info(update, context)
     else:
         update.message.reply_text("Please use the menu buttons or commands.", reply_markup=get_main_menu_keyboard())
 
@@ -459,12 +750,12 @@ def resolve_battle(context: CallbackContext, game_id: int) -> None:
             # Send result messages to both players
             context.bot.send_message(
                 p1_id,
-                result_message + f"\n\nYour new balance: {p1_tokens} tokens",
+                result_message + f"\n\nYour new balance is {p1_tokens} tokens.",
                 reply_markup=get_main_menu_keyboard()
             )
             context.bot.send_message(
                 p2_id,
-                result_message + f"\n\nYour new balance: {p2_tokens} tokens",
+                result_message + f"\n\nYour new balance is {p2_tokens} tokens.",
                 reply_markup=get_main_menu_keyboard()
             )
             
@@ -611,7 +902,7 @@ def handle_tournament_join(update: Update, context: CallbackContext) -> None:
     if user_data["tokens"] < 100:
         query.edit_message_text("❌ You need 100 tokens to join the tournament!")
         return
-        
+    
     tournament = active_tournaments.get(tournament_id)
     if not tournament:
         query.edit_message_text("❌ Tournament not found or already ended!")
@@ -764,9 +1055,13 @@ def main() -> None:
     dispatcher.add_handler(CommandHandler("leaderboard", show_leaderboard))
     dispatcher.add_handler(CommandHandler("swap", show_swap_options))
     dispatcher.add_handler(CommandHandler("tournament", create_tournament))
+    dispatcher.add_handler(CommandHandler("referral", handle_referral_code))
+    dispatcher.add_handler(CommandHandler("classes", show_character_classes))
+    dispatcher.add_handler(CommandHandler("referralinfo", show_referral_info))
     dispatcher.add_handler(CallbackQueryHandler(handle_battle_stake, pattern='^stake_[0-9]+$'))
     dispatcher.add_handler(CallbackQueryHandler(handle_battle_move, pattern='^move_[0-9]+_[a-z]+$'))
     dispatcher.add_handler(CallbackQueryHandler(handle_tournament_join, pattern='^join_tournament_[0-9]+$'))
+    dispatcher.add_handler(CallbackQueryHandler(handle_class_selection, pattern='^select_class_[a-z]+$'))
     dispatcher.add_handler(MessageHandler(Filters.text & ~Filters.command, handle_menu_choice))
 
     updater.start_polling()
