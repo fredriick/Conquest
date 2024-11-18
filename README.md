@@ -37,8 +37,8 @@ A multiplayer token-based battle game for Telegram with competitive mechanics an
 
 1. Clone the repository:
 ```bash
-git clone https://github.com/yourusername/crypto-battle-arena.git
-cd crypto-battle-arena
+git clone https://github.com/fredriick/Conquest.git
+cd Conquest
 ```
 
 2. Create and activate virtual environment:
