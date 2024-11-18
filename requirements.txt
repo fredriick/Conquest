@@ -1,0 +1,12 @@
+python-telegram-bot==13.7
+python-dotenv==1.0.0
+APScheduler==3.6.3
+cachetools==4.2.2
+certifi>=2021.5.30
+tornado>=6.1
+pytz>=2021.1
+six>=1.16.0
+tzlocal>=4.2
+typing-extensions>=4.0.0
+SQLite3-API>=2.0.1
+urllib3==1.26.15
